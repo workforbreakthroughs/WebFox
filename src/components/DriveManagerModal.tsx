@@ -411,10 +411,14 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
                   Direct Local Hard Drive Access as Drive {selectedDrive}
                 </span>
               </div>
-              {mountedFolderName && (
+              {mountedFolderName ? (
                 <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold border border-emerald-500/30 flex items-center space-x-1">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                   <span>Direct Linked: {mountedFolderName}</span>
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded-full bg-orange-500/10 text-orange-600 dark:text-orange-400 text-[10px] font-bold border border-orange-500/20">
+                  Direct Disk Mode
                 </span>
               )}
             </div>
@@ -422,6 +426,24 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
             <p className="text-[11px] text-slate-600 dark:text-neutral-300 leading-normal">
               Directly connect any folder on your computer (e.g. <code>D:\FoxPro\Data</code> or <code>C:\VFP_PROJECT</code>). FoxStudio reads and writes <code>.DBF</code> and <code>.PRG</code> files directly on your local hard drive. <strong>Zero files are uploaded to any server.</strong>
             </p>
+
+            {/* Standalone Tab Prompt for Iframe previews */}
+            {directDiskService.isInIframe() && (
+              <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between gap-2">
+                <div className="flex items-center space-x-2 text-emerald-800 dark:text-emerald-300 text-[11px]">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                  <span>To bypass browser iframe restrictions and enable native hard drive read/write access:</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => window.open(window.location.href, '_blank')}
+                  className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] flex items-center space-x-1 flex-shrink-0 shadow-xs"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>Open in Dedicated Tab</span>
+                </button>
+              </div>
+            )}
 
             <div className="flex flex-wrap gap-2.5 pt-1">
               <button

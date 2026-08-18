@@ -19,7 +19,7 @@ class DirectDiskService {
   }
 
   /**
-   * Check if currently running inside an iframe (which may restrict showDirectoryPicker)
+   * Check if currently running inside an iframe (which restricts showDirectoryPicker in Chromium)
    */
   public isInIframe(): boolean {
     try {
@@ -30,7 +30,8 @@ class DirectDiskService {
   }
 
   /**
-   * Mount a physical local folder with direct read/write permission
+   * Mount a physical local folder with direct read/write permission.
+   * Rock-solid async traversal with timeout protection to prevent hanging in Edge/Chrome.
    */
   public async mountPhysicalFolder(): Promise<{
     folderName: string;
@@ -39,6 +40,10 @@ class DirectDiskService {
   }> {
     if (!this.isSupported()) {
       throw new Error('Your browser does not support the File System Access API. Please use Google Chrome or Microsoft Edge.');
+    }
+
+    if (this.isInIframe()) {
+      throw new Error('IFRAME_RESTRICTION: Direct hard drive access requires opening FoxStudio in a dedicated browser tab.');
     }
 
     // @ts-ignore
@@ -53,30 +58,57 @@ class DirectDiskService {
     const discoveredFiles: MountedFileInfo[] = [];
     const parsedTables: DBFTable[] = [];
 
-    // Safely traverse directory handle entries
-    const entries: any[] = [];
-    try {
-      if (typeof dirHandle.values === 'function') {
-        const iter = dirHandle.values();
-        let next = await iter.next();
-        while (!next.done) {
-          if (next.value) entries.push(next.value);
-          next = await iter.next();
+    // Traverse directory handle entries with safety timeout and async iterator support
+    const rawEntries: any[] = [];
+
+    const traversePromise = (async () => {
+      try {
+        // Modern standard: for await ... of dirHandle.values()
+        // @ts-ignore
+        if (typeof dirHandle.values === 'function') {
+          // @ts-ignore
+          for await (const entry of dirHandle.values()) {
+            if (entry) rawEntries.push(entry);
+          }
+        } else if (typeof dirHandle.entries === 'function') {
+          // @ts-ignore
+          for await (const [, entry] of dirHandle.entries()) {
+            if (entry) rawEntries.push(entry);
+          }
         }
-      } else if (typeof dirHandle.entries === 'function') {
-        const iter = dirHandle.entries();
-        let next = await iter.next();
-        while (!next.done) {
-          if (next.value && next.value[1]) entries.push(next.value[1]);
-          next = await iter.next();
+      } catch (iterErr) {
+        console.warn('Standard async iteration failed, trying manual fallback:', iterErr);
+        try {
+          // Fallback manual iterator
+          // @ts-ignore
+          const iter = dirHandle.values ? dirHandle.values() : dirHandle.entries();
+          let item = await iter.next();
+          let safetyCount = 0;
+          while (!item.done && safetyCount < 5000) {
+            const val = item.value ? (item.value.kind ? item.value : item.value[1]) : null;
+            if (val) rawEntries.push(val);
+            item = await iter.next();
+            safetyCount++;
+          }
+        } catch (manualErr) {
+          console.error('Manual traversal failed:', manualErr);
         }
       }
-    } catch (e) {
-      console.warn('Iterator reading failed, attempting fallback array:', e);
+    })();
+
+    // 8-second safety timeout to guarantee the UI never gets stuck loading in Edge
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Directory read timed out. Please retry.')), 8000)
+    );
+
+    try {
+      await Promise.race([traversePromise, timeoutPromise]);
+    } catch (raceErr) {
+      console.warn('Traversal warning/timeout:', raceErr);
     }
 
-    for (const entry of entries) {
-      if (entry.kind === 'file') {
+    for (const entry of rawEntries) {
+      if (entry && entry.kind === 'file') {
         try {
           const file = await entry.getFile();
           const ext = file.name.split('.').pop()?.toUpperCase() || '';

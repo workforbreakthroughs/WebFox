@@ -20,10 +20,12 @@ import {
   Laptop,
   Globe,
   Settings,
-  HardDrive
+  HardDrive,
+  ExternalLink
 } from 'lucide-react';
 import { DBFTable, VFPProject } from '../types/foxpro';
 import { DBFBinaryEngine } from '../services/dbfEngine';
+import { directDiskService } from '../services/directDiskService';
 import { ActiveView } from '../App';
 
 interface HeaderProps {
@@ -182,6 +184,21 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Terminal className="w-3.5 h-3.5" />
             <span className="hidden md:inline">Command</span>
+          </button>
+
+          {/* Standalone Window / Tab Launcher for Direct Hard Drive Access */}
+          <button
+            id="btn_launch_standalone_tab"
+            onClick={() => window.open(window.location.href, '_blank')}
+            className={`flex items-center space-x-1 sm:space-x-1.5 px-2 sm:px-2.5 py-1.5 rounded text-xs font-semibold border transition-colors ${
+              theme === 'linux-dark'
+                ? 'bg-emerald-950/60 hover:bg-emerald-900 border-emerald-700 text-emerald-300'
+                : 'bg-emerald-50 hover:bg-emerald-100 border-emerald-300 text-emerald-800'
+            }`}
+            title="Open in Dedicated Browser Tab (Enables Direct Native Hard Drive Access)"
+          >
+            <ExternalLink className="w-3.5 h-3.5 text-emerald-500" />
+            <span className="hidden lg:inline">Direct Disk Tab</span>
           </button>
 
           {/* Cross-Platform OS Guides */}
