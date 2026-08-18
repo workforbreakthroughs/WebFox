@@ -1,5 +1,5 @@
 import { DBFRecord, DBFTable, FormDefinition, VFPCommandLog, VFPProject } from '../types/foxpro';
-import { VFPExpressionEngine, VFPSqlEngine } from './dbfEngine';
+import { VFPExpressionEngine, VFPSqlEngine, DBFBinaryEngine } from './dbfEngine';
 
 export interface CommandContext {
   project: VFPProject;
@@ -11,8 +11,67 @@ export interface CommandContext {
   onModifyStructure: (tableId: string) => void;
   onBrowse: (tableId: string) => void;
   onUpdateTable: (table: DBFTable) => void;
+  onImportTable?: (table: DBFTable) => void;
+  onOpenImport?: () => void;
+  onOpenDriveManager?: () => void;
   onSetDefault?: (path: string) => void;
   onSetPath?: (path: string) => void;
+}
+
+export function cleanFileNameOrPath(input: string): {
+  raw: string;
+  drive: string;
+  directory: string;
+  fileName: string;
+  baseName: string;
+  ext: string;
+} {
+  let cleaned = input.trim();
+  // Strip enclosing quotes ('...' or "...") or FoxPro brackets ([...])
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'")) ||
+    (cleaned.startsWith('[') && cleaned.endsWith(']'))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+
+  // Also remove standalone surrounding brackets/quotes if any remain
+  cleaned = cleaned.replace(/^[\["']+|[\]"']+$/g, '').trim();
+
+  let drive = '';
+  const driveMatch = /^([A-Za-z]:)/.exec(cleaned);
+  if (driveMatch) {
+    drive = driveMatch[1].toUpperCase();
+  }
+
+  // Find directory separator (Windows \ or Unix /)
+  const lastSlash = Math.max(cleaned.lastIndexOf('\\'), cleaned.lastIndexOf('/'));
+  let directory = '';
+  let fileNameWithExt = cleaned;
+
+  if (lastSlash >= 0) {
+    directory = cleaned.substring(0, lastSlash + 1);
+    fileNameWithExt = cleaned.substring(lastSlash + 1);
+  }
+
+  // Extract base name without extension
+  const dotIdx = fileNameWithExt.lastIndexOf('.');
+  let baseName = fileNameWithExt;
+  let ext = '';
+  if (dotIdx > 0) {
+    baseName = fileNameWithExt.substring(0, dotIdx);
+    ext = fileNameWithExt.substring(dotIdx + 1).toUpperCase();
+  }
+
+  return {
+    raw: cleaned,
+    drive,
+    directory,
+    fileName: fileNameWithExt,
+    baseName: baseName.trim(),
+    ext,
+  };
 }
 
 export class VFPCommandInterpreter {
@@ -342,11 +401,12 @@ export class VFPCommandInterpreter {
     const allTables = [...context.project.database.tables, ...context.project.freeTables];
     const activeTable = allTables.find((t) => t.id === context.activeTableId);
 
-    // 4. USE <table_name> [EXCLUSIVE / IN n]
+    // 4. USE [FileName | ?] [IN nWorkArea | cTableAlias] [EXCLUSIVE | SHARED] [NOUPDATE] [ALIAS cTableAlias] [AGAIN] [ORDER TagName]
     if (upper.startsWith('USE')) {
-      const parts = rawCmd.split(/\s+/);
-      if (parts.length < 2 || parts[1].toUpperCase() === '') {
-        // USE with no param closes table
+      let rest = rawCmd.substring(3).trim();
+
+      if (!rest) {
+        // USE with no param closes table in current workarea
         return {
           newActiveTableId: undefined,
           log: {
@@ -359,16 +419,118 @@ export class VFPCommandInterpreter {
         };
       }
 
-      const targetName = parts[1].replace(/\.dbf$/i, '').toUpperCase();
-      const targetTable = allTables.find((t) => t.name.toUpperCase() === targetName);
+      // Check for 'USE ?' - FoxPro file open prompt
+      if (rest.startsWith('?')) {
+        if (context.onOpenImport) {
+          context.onOpenImport();
+        }
+        return {
+          log: {
+            id: Math.random().toString(36).substr(2, 9),
+            command: rawCmd,
+            success: true,
+            message: 'Prompted Open File Dialog for .DBF table (USE ?)...',
+            timestamp,
+          },
+        };
+      }
+
+      // Parse out VFP clauses (EXCLUSIVE, SHARED, AGAIN, NOUPDATE, IN <...>, ALIAS <...>, ORDER <...>)
+      let cleanedParam = rest;
+      cleanedParam = cleanedParam.replace(/\b(EXCLUSIVE|SHARED|AGAIN|NOUPDATE)\b/gi, '').trim();
+      cleanedParam = cleanedParam.replace(/\bIN\s+[0-9A-Za-z_]+\b/gi, '').trim();
+      cleanedParam = cleanedParam.replace(/\bALIAS\s+[0-9A-Za-z_]+\b/gi, '').trim();
+      cleanedParam = cleanedParam.replace(/\bORDER\s+[0-9A-Za-z_]+\b/gi, '').trim();
+
+      const parsed = cleanFileNameOrPath(cleanedParam);
+      const targetBase = parsed.baseName.toUpperCase();
+      const targetFile = parsed.fileName.toUpperCase();
+
+      // Look up in all existing tables in project database & free tables
+      let targetTable = allTables.find((t) => {
+        const tBase = t.name.toUpperCase();
+        const tFile = t.filename.toUpperCase();
+        const tBaseFromFile = t.filename.replace(/\.dbf$/i, '').toUpperCase();
+        const tId = t.id.toUpperCase();
+
+        return (
+          tBase === targetBase ||
+          tFile === targetFile ||
+          tFile === `${targetBase}.DBF` ||
+          tBaseFromFile === targetBase ||
+          tId === targetBase
+        );
+      });
+
+      // If not yet in memory, check if it is in project.mountedFiles (e.g. from local mounted folder)
+      if (!targetTable && context.project.mountedFiles && context.project.mountedFiles.length > 0) {
+        const matchedMounted = context.project.mountedFiles.find((mf) => {
+          const mfBase = mf.name.replace(/\.dbf$/i, '').toUpperCase();
+          const mfName = mf.name.toUpperCase();
+          return mfBase === targetBase || mfName === targetFile || mfName === `${targetBase}.DBF`;
+        });
+
+        if (matchedMounted) {
+          // If the mounted file has a FileSystemHandle, attempt to read & auto-parse
+          if (matchedMounted.handle && context.onImportTable) {
+            try {
+              (async () => {
+                try {
+                  const file = await (matchedMounted.handle as any).getFile();
+                  const buffer = await file.arrayBuffer();
+                  const table = DBFBinaryEngine.parseDBF(buffer, file.name);
+                  if (context.onImportTable) {
+                    context.onImportTable(table);
+                  }
+                  if (context.onOpenTable) {
+                    context.onOpenTable(table.id);
+                  }
+                } catch (e) {
+                  console.error('Failed to auto-load mounted DBF:', e);
+                }
+              })();
+
+              return {
+                log: {
+                  id: Math.random().toString(36).substr(2, 9),
+                  command: rawCmd,
+                  success: true,
+                  message: `Loading mounted disk table '${matchedMounted.name}' (${matchedMounted.size} bytes) from ${context.project.mountedFolderName || 'mounted drive'}...`,
+                  timestamp,
+                },
+              };
+            } catch (err) {
+              console.warn('Error reading handle:', err);
+            }
+          }
+
+          return {
+            log: {
+              id: Math.random().toString(36).substr(2, 9),
+              command: rawCmd,
+              success: true,
+              message: `Found mounted disk file '${matchedMounted.name}'. Click "Import .DBF" to load it into the active workspace.`,
+              timestamp,
+            },
+          };
+        }
+      }
 
       if (!targetTable) {
+        const curDir = context.project.currentDirectory || `${context.project.defaultDrive || 'X:'}\\VFP_DATA\\`;
+        const availableTableNames = allTables.map((t) => t.name).join(', ');
+
         return {
           log: {
             id: Math.random().toString(36).substr(2, 9),
             command: rawCmd,
             success: false,
-            message: `Error 1: File '${targetName}.DBF' does not exist.`,
+            message: `Error 1: File '${targetBase}.DBF' does not exist in working directory '${curDir}'.\n` +
+              `• Current In-Memory Tables: [${availableTableNames || 'None'}]\n` +
+              `• How to load a real DBF from your D: drive in this web app:\n` +
+              `   1. Type 'USE ?' to browse and open the .DBF file directly from your computer.\n` +
+              `   2. Or click 'Drive Manager' to mount your local folder '${curDir}' (using File System Access API).\n` +
+              `   3. Or click 'Import .DBF' in the top menu.`,
             timestamp,
           },
         };
@@ -381,7 +543,7 @@ export class VFPCommandInterpreter {
           id: Math.random().toString(36).substr(2, 9),
           command: rawCmd,
           success: true,
-          message: `Selected table '${targetTable.name}' (${targetTable.records.length} records, ${targetTable.fields.length} fields).`,
+          message: `Selected table '${targetTable.name}' (${targetTable.records.length} records, ${targetTable.fields.length} fields) in work area 1.`,
           timestamp,
           tableAffected: targetTable.name,
         },
@@ -871,8 +1033,16 @@ export class VFPCommandInterpreter {
 
     // 17. DO FORM <formname>
     if (upper.startsWith('DO FORM')) {
-      const formName = rawCmd.substring(7).trim().replace(/\.scx$/i, '').toUpperCase();
-      const form = context.project.forms.find((f) => f.name.toUpperCase() === formName);
+      const formParam = rawCmd.substring(7).trim();
+      const parsedForm = cleanFileNameOrPath(formParam);
+      const formTarget = parsedForm.baseName.toUpperCase();
+
+      const form = context.project.forms.find(
+        (f) =>
+          f.name.toUpperCase() === formTarget ||
+          f.id.toUpperCase() === formTarget ||
+          f.name.replace(/\.scx$/i, '').toUpperCase() === formTarget
+      );
 
       if (!form) {
         return {
@@ -880,7 +1050,7 @@ export class VFPCommandInterpreter {
             id: Math.random().toString(36).substr(2, 9),
             command: rawCmd,
             success: false,
-            message: `Error: Form '${formName}.SCX' not found in project.`,
+            message: `Error: Form '${formTarget}.SCX' not found in project (Available: ${context.project.forms.map((f) => f.name).join(', ')}).`,
             timestamp,
           },
         };
@@ -900,8 +1070,16 @@ export class VFPCommandInterpreter {
 
     // 18. MODIFY FORM <formname>
     if (upper.startsWith('MODIFY FORM') || upper.startsWith('MODI FORM')) {
-      const formName = rawCmd.replace(/^MODI(FY)?\s+FORM\s+/i, '').trim().replace(/\.scx$/i, '').toUpperCase();
-      const form = context.project.forms.find((f) => f.name.toUpperCase() === formName);
+      const formParam = rawCmd.replace(/^MODI(FY)?\s+FORM\s+/i, '').trim();
+      const parsedForm = cleanFileNameOrPath(formParam);
+      const formTarget = parsedForm.baseName.toUpperCase();
+
+      const form = context.project.forms.find(
+        (f) =>
+          f.name.toUpperCase() === formTarget ||
+          f.id.toUpperCase() === formTarget ||
+          f.name.replace(/\.scx$/i, '').toUpperCase() === formTarget
+      );
 
       if (!form) {
         return {
@@ -909,7 +1087,7 @@ export class VFPCommandInterpreter {
             id: Math.random().toString(36).substr(2, 9),
             command: rawCmd,
             success: false,
-            message: `Error: Form '${formName}.SCX' not found.`,
+            message: `Error: Form '${formTarget}.SCX' not found.`,
             timestamp,
           },
         };
@@ -927,7 +1105,33 @@ export class VFPCommandInterpreter {
       };
     }
 
-    // 19. SQL Query: SELECT ...
+    // 19. DO <program.prg>
+    if (upper.startsWith('DO ') && !upper.startsWith('DO FORM')) {
+      const prgParam = rawCmd.substring(3).trim();
+      const parsedPrg = cleanFileNameOrPath(prgParam);
+      const prgTarget = parsedPrg.baseName.toUpperCase();
+
+      const prg = context.project.programs?.find(
+        (p) =>
+          p.name.toUpperCase() === prgTarget ||
+          p.name.toUpperCase() === `${prgTarget}.PRG` ||
+          p.name.replace(/\.prg$/i, '').toUpperCase() === prgTarget
+      );
+
+      if (prg) {
+        return {
+          log: {
+            id: Math.random().toString(36).substr(2, 9),
+            command: rawCmd,
+            success: true,
+            message: `Executing PRG '${prg.name}'...\n${prg.code.split('\n').map((l) => `  ${l}`).join('\n')}`,
+            timestamp,
+          },
+        };
+      }
+    }
+
+    // 20. SQL Query: SELECT ...
     if (upper.startsWith('SELECT')) {
       const result = VFPSqlEngine.executeRawSQL(rawCmd, allTables);
       if (result.error) {

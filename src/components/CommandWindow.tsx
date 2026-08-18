@@ -23,6 +23,9 @@ interface CommandWindowProps {
   onOpenFormDesigner: (formId: string) => void;
   onRunForm: (formId: string) => void;
   onOpenQueryBuilder: (queryId: string) => void;
+  onOpenImport?: () => void;
+  onOpenDriveManager?: () => void;
+  onImportTable?: (table: DBFTable) => void;
   isOpen: boolean;
   onToggleOpen: () => void;
   theme: string;
@@ -37,6 +40,9 @@ export const CommandWindow: React.FC<CommandWindowProps> = ({
   onOpenFormDesigner,
   onRunForm,
   onOpenQueryBuilder,
+  onOpenImport,
+  onOpenDriveManager,
+  onImportTable,
   isOpen,
   onToggleOpen,
   theme,
@@ -116,6 +122,25 @@ export const CommandWindow: React.FC<CommandWindowProps> = ({
             },
           });
         }
+      },
+      onImportTable: (t: DBFTable) => {
+        if (onImportTable) {
+          onImportTable(t);
+        } else {
+          onUpdateProject({
+            ...project,
+            database: {
+              ...project.database,
+              tables: [...project.database.tables, t],
+            },
+          });
+        }
+      },
+      onOpenImport: () => {
+        if (onOpenImport) onOpenImport();
+      },
+      onOpenDriveManager: () => {
+        if (onOpenDriveManager) onOpenDriveManager();
       },
       onSetDefault: (path: string) => {
         const driveMatch = /^([A-Za-z]:)/.exec(path);

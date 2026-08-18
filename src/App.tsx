@@ -615,6 +615,9 @@ export default function App() {
           setActiveQueryId(id);
           setActiveView('query_builder');
         }}
+        onOpenImport={() => setIsImportExportModalOpen(true)}
+        onOpenDriveManager={() => setIsDriveManagerOpen(true)}
+        onImportTable={handleImportTable}
         isOpen={isCommandWindowOpen}
         onToggleOpen={() => setIsCommandWindowOpen(!isCommandWindowOpen)}
         theme={theme}
