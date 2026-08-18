@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   HardDrive,
   Folder,
@@ -14,18 +14,25 @@ import {
   ArrowRight,
   Database,
   RefreshCw,
-  Info
+  Info,
+  AlertCircle,
+  FileText,
+  ExternalLink,
+  ShieldCheck,
+  Save
 } from 'lucide-react';
 import { DBFTable, VFPProject, MountedFileInfo } from '../types/foxpro';
 import { DBFBinaryEngine } from '../services/dbfEngine';
+import { directDiskService } from '../services/directDiskService';
 
 interface DriveManagerModalProps {
   isOpen: boolean;
   onClose: () => void;
   project: VFPProject;
-  onUpdateProjectSettings: (settings: { defaultDrive?: string; currentDirectory?: string; searchPath?: string; mountedFolderName?: string; mountedFiles?: MountedFileInfo[] }) => void;
-  onImportTable: (table: DBFTable) => void;
-  onSelectTable: (tableId: string) => void;
+  onUpdateProjectSettings?: (settings: { defaultDrive?: string; currentDirectory?: string; searchPath?: string; mountedFolderName?: string; mountedFiles?: MountedFileInfo[] }) => void;
+  onUpdateProject?: (project: VFPProject) => void;
+  onImportTable?: (table: DBFTable) => void;
+  onSelectTable?: (tableId: string) => void;
   theme: string;
 }
 
@@ -34,6 +41,7 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
   onClose,
   project,
   onUpdateProjectSettings,
+  onUpdateProject,
   onImportTable,
   onSelectTable,
   theme,
@@ -46,8 +54,32 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
   const [mountedFolderName, setMountedFolderName] = useState<string | undefined>(project.mountedFolderName);
   const [isMounting, setIsMounting] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [iframeRestriction, setIframeRestriction] = useState<boolean>(false);
+
+  // Hidden native inputs for bulletproof folder and file picking
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
+
+  // Safe wrapper for project update
+  const applyProjectSettings = (settings: {
+    defaultDrive?: string;
+    currentDirectory?: string;
+    searchPath?: string;
+    mountedFolderName?: string;
+    mountedFiles?: MountedFileInfo[];
+  }) => {
+    if (typeof onUpdateProjectSettings === 'function') {
+      onUpdateProjectSettings(settings);
+    } else if (typeof onUpdateProject === 'function') {
+      onUpdateProject({
+        ...project,
+        ...settings,
+      });
+    }
+  };
 
   // Preset drives
   const presetDrives = [
@@ -65,7 +97,7 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
     const newPath = `${drive}\\DATA;${drive}\\FORMS;${drive}\\REPORTS`;
     setSearchPath(newPath);
 
-    onUpdateProjectSettings({
+    applyProjectSettings({
       defaultDrive: drive,
       currentDirectory: newDir,
       searchPath: newPath,
@@ -92,7 +124,7 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
     setSelectedDrive(newDrive);
     setCurrentDir(path);
 
-    onUpdateProjectSettings({
+    applyProjectSettings({
       defaultDrive: newDrive,
       currentDirectory: path,
       searchPath: searchPath,
@@ -102,46 +134,50 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
-  // Modern HTML5 File System Access API - Mount actual local folder
-  const handleMountLocalDirectory = async () => {
+  // Process File list from standard input (fallback mode)
+  const processSelectedFiles = async (files: FileList | null, detectedFolderName?: string) => {
+    if (!files || files.length === 0) return;
+
+    setIsMounting(true);
+    setErrorMessage(null);
+
     try {
-      if (!('showDirectoryPicker' in window)) {
-        alert('Your current browser does not support the File System Access API. You can still set virtual drive paths like "SET DEFAULT TO X:\\DATA" or drag and drop .DBF files directly.');
-        return;
+      const discoveredFiles: MountedFileInfo[] = [];
+      let importedCount = 0;
+
+      // Extract folder name from webkitRelativePath or first file
+      let folderName = detectedFolderName;
+      if (!folderName) {
+        const firstRelPath = files[0].webkitRelativePath;
+        if (firstRelPath && firstRelPath.includes('/')) {
+          folderName = firstRelPath.split('/')[0];
+        } else {
+          folderName = 'LOCAL_FOLDER';
+        }
       }
 
-      setIsMounting(true);
-      // @ts-ignore
-      const dirHandle = await (window as any).showDirectoryPicker({
-        mode: 'readwrite',
-      });
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const ext = file.name.split('.').pop()?.toUpperCase() || '';
+        
+        discoveredFiles.push({
+          name: file.name,
+          size: file.size,
+          lastModified: new Date(file.lastModified).toISOString().split('T')[0],
+          type: ext,
+        });
 
-      const folderName = dirHandle.name;
-      const discoveredFiles: MountedFileInfo[] = [];
-
-      // Scan directory entries
-      // @ts-ignore
-      for await (const entry of dirHandle.values()) {
-        if (entry.kind === 'file') {
-          const file = await entry.getFile();
-          const ext = file.name.split('.').pop()?.toUpperCase() || '';
-          discoveredFiles.push({
-            name: file.name,
-            size: file.size,
-            lastModified: new Date(file.lastModified).toISOString().split('T')[0],
-            type: ext,
-            handle: entry,
-          });
-
-          // If DBF file, auto-parse and offer to load
-          if (ext === 'DBF') {
-            try {
-              const buffer = await file.arrayBuffer();
-              const table = DBFBinaryEngine.parseDBF(buffer, file.name);
+        // Auto-parse .DBF files
+        if (ext === 'DBF') {
+          try {
+            const buffer = await file.arrayBuffer();
+            const table = DBFBinaryEngine.parseDBF(buffer, file.name);
+            if (onImportTable) {
               onImportTable(table);
-            } catch (err) {
-              console.warn(`Could not parse ${file.name}:`, err);
             }
+            importedCount++;
+          } catch (err) {
+            console.warn(`Could not parse ${file.name}:`, err);
           }
         }
       }
@@ -149,23 +185,94 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
       setMountedFolderName(folderName);
       setMountedFiles(discoveredFiles);
 
-      const newDir = `X:\\${folderName.toUpperCase()}\\`;
-      setSelectedDrive('X:');
+      const targetDrive = selectedDrive || 'X:';
+      const newDir = `${targetDrive}\\${folderName.toUpperCase()}\\`;
       setCurrentDir(newDir);
       setCustomPathInput(newDir);
 
-      onUpdateProjectSettings({
-        defaultDrive: 'X:',
+      applyProjectSettings({
+        defaultDrive: targetDrive,
         currentDirectory: newDir,
         mountedFolderName: folderName,
         mountedFiles: discoveredFiles,
       });
 
-      setStatusMessage(`Successfully mounted local folder "${folderName}" as Drive X: (${discoveredFiles.length} files detected).`);
-      setTimeout(() => setStatusMessage(null), 4000);
+      setStatusMessage(`Mounted folder "${folderName}" directly as Drive ${targetDrive} (${discoveredFiles.length} files, ${importedCount} DBF tables active). Zero server uploads.`);
+      setTimeout(() => setStatusMessage(null), 5000);
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
-        alert(`Error mounting folder: ${err.message || err}`);
+      setErrorMessage(`Error reading local folder: ${err.message || err}`);
+    } finally {
+      setIsMounting(false);
+    }
+  };
+
+  // Handler for directory picker input (fallback)
+  const handleFolderInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      processSelectedFiles(e.target.files);
+    }
+  };
+
+  // Handler for individual DBF file selection
+  const handleFilesInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      processSelectedFiles(e.target.files, 'DBF_FILES');
+    }
+  };
+
+  // Primary: Direct Local Disk Access via File System Access API
+  const handleMountLocalDirectory = async () => {
+    setErrorMessage(null);
+    setIframeRestriction(false);
+
+    try {
+      setIsMounting(true);
+
+      const result = await directDiskService.mountPhysicalFolder();
+      
+      // Auto-load parsed tables
+      if (result.tables && result.tables.length > 0 && onImportTable) {
+        for (const tbl of result.tables) {
+          onImportTable(tbl);
+        }
+      }
+
+      setMountedFolderName(result.folderName);
+      setMountedFiles(result.files);
+
+      const targetDrive = selectedDrive || 'X:';
+      const newDir = `${targetDrive}\\${result.folderName.toUpperCase()}\\`;
+      setCurrentDir(newDir);
+      setCustomPathInput(newDir);
+
+      applyProjectSettings({
+        defaultDrive: targetDrive,
+        currentDirectory: newDir,
+        mountedFolderName: result.folderName,
+        mountedFiles: result.files,
+      });
+
+      setStatusMessage(`⚡ Direct Hard Drive Access Active: Connected to folder "${result.folderName}" on Drive ${targetDrive} (${result.files.length} files, ${result.tables.length} tables). No files are uploaded to any server.`);
+      setTimeout(() => setStatusMessage(null), 6000);
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        // User cancelled picker dialog
+        return;
+      }
+
+      console.warn('Direct File System Access API check:', err);
+
+      // Check if restricted by iframe sandbox
+      if (directDiskService.isInIframe() || String(err.message).includes('Cross-origin') || String(err.message).includes('sub frames')) {
+        setIframeRestriction(true);
+        setErrorMessage('Browser security blocks direct hard drive access inside embedded preview frames. Open in a dedicated tab for full direct read/write disk access, or choose a folder below.');
+      } else {
+        // Trigger folder input fallback
+        if (folderInputRef.current) {
+          folderInputRef.current.click();
+        } else {
+          setErrorMessage(`Notice: ${err.message || err}`);
+        }
       }
     } finally {
       setIsMounting(false);
@@ -176,6 +283,26 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-60 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 text-xs font-sans">
+      {/* Hidden File & Folder Inputs */}
+      <input
+        type="file"
+        ref={folderInputRef}
+        className="hidden"
+        // @ts-ignore
+        webkitdirectory=""
+        directory=""
+        multiple
+        onChange={handleFolderInputChange}
+      />
+      <input
+        type="file"
+        ref={fileInputRef}
+        className="hidden"
+        accept=".dbf,.DBF,.csv,.CSV,.prg,.PRG"
+        multiple
+        onChange={handleFilesInputChange}
+      />
+
       <div className="w-full max-w-3xl bg-white dark:bg-neutral-900 rounded-xl shadow-2xl border border-slate-300 dark:border-neutral-700 flex flex-col max-h-[90vh] overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-inherit bg-slate-50 dark:bg-neutral-800">
@@ -184,11 +311,17 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
               <HardDrive className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="font-bold text-sm text-slate-800 dark:text-neutral-100">
-                Working Drive & Directory Manager
-              </h3>
+              <div className="flex items-center space-x-2">
+                <h3 className="font-bold text-sm text-slate-800 dark:text-neutral-100">
+                  Working Drive & Direct Local Disk Manager
+                </h3>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold border border-emerald-500/20 flex items-center space-x-1">
+                  <ShieldCheck className="w-3 h-3" />
+                  <span>100% Client-Side Direct Access (No Uploads)</span>
+                </span>
+              </div>
               <p className="text-[11px] text-slate-500 dark:text-neutral-400">
-                Set active drive (e.g. <code>SET DEFAULT TO X:</code>) or mount a real local drive/folder
+                Set active drive (e.g. <code>SET DEFAULT TO D:</code>) or attach a direct local folder on your computer
               </p>
             </div>
           </div>
@@ -204,6 +337,30 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
             <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 font-medium flex items-center space-x-2">
               <Check className="w-4 h-4 flex-shrink-0" />
               <span>{statusMessage}</span>
+            </div>
+          )}
+
+          {/* Error / Security Message */}
+          {errorMessage && (
+            <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-800 dark:text-amber-300 space-y-2">
+              <div className="flex items-center space-x-2 font-semibold">
+                <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                <span>{errorMessage}</span>
+              </div>
+              {iframeRestriction && (
+                <div className="pt-1 flex items-center space-x-2">
+                  <button
+                    onClick={() => window.open(window.location.href, '_blank')}
+                    className="px-3 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs flex items-center space-x-1.5 shadow-xs"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Open in Dedicated Tab for Direct Hard Drive Access</span>
+                  </button>
+                  <span className="text-[11px] text-slate-500">
+                    (Enables Chrome/Edge native disk read & write handle)
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
@@ -245,35 +402,57 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
             </div>
           </div>
 
-          {/* Section 2: Mount Real Local Disk / Folder */}
+          {/* Section 2: Direct Local Hard Drive / Folder Access */}
           <div className="p-4 rounded-xl bg-gradient-to-r from-amber-50 to-orange-50 dark:from-neutral-800 dark:to-neutral-800/80 border border-amber-200/80 dark:border-neutral-700 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
                 <FolderOpen className="w-4 h-4 text-amber-600 dark:text-amber-400" />
                 <span className="font-bold text-xs text-slate-900 dark:text-white">
-                  Mount Local Directory as Drive X: (Direct File System Access)
+                  Direct Local Hard Drive Access as Drive {selectedDrive}
                 </span>
               </div>
               {mountedFolderName && (
-                <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 text-[10px] font-bold border border-emerald-500/20">
-                  Mounted: {mountedFolderName}
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px] font-bold border border-emerald-500/30 flex items-center space-x-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  <span>Direct Linked: {mountedFolderName}</span>
                 </span>
               )}
             </div>
 
             <p className="text-[11px] text-slate-600 dark:text-neutral-300 leading-normal">
-              Select any real folder on your computer (e.g. <code>X:\MyData</code> or <code>/home/user/dbf</code>). FoxStudio will read all real <code>.DBF</code> and <code>.PRG</code> files directly into your workspace.
+              Directly connect any folder on your computer (e.g. <code>D:\FoxPro\Data</code> or <code>C:\VFP_PROJECT</code>). FoxStudio reads and writes <code>.DBF</code> and <code>.PRG</code> files directly on your local hard drive. <strong>Zero files are uploaded to any server.</strong>
             </p>
 
-            <button
-              id="btn_mount_local_dir"
-              onClick={handleMountLocalDirectory}
-              disabled={isMounting}
-              className="px-3.5 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs flex items-center space-x-2 shadow-sm transition-all disabled:opacity-50"
-            >
-              {isMounting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Folder className="w-3.5 h-3.5" />}
-              <span>{mountedFolderName ? 'Change Mounted Folder / Drive...' : 'Mount Local Drive X: Folder...'}</span>
-            </button>
+            <div className="flex flex-wrap gap-2.5 pt-1">
+              <button
+                id="btn_mount_local_dir"
+                type="button"
+                onClick={handleMountLocalDirectory}
+                disabled={isMounting}
+                className="px-3.5 py-2 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-bold text-xs flex items-center space-x-2 shadow-xs transition-all disabled:opacity-50"
+              >
+                {isMounting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Folder className="w-3.5 h-3.5" />}
+                <span>{mountedFolderName ? 'Change Direct Disk Folder...' : '⚡ Mount Direct Disk Folder...'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => folderInputRef.current?.click()}
+                className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 dark:bg-neutral-700 dark:hover:bg-neutral-600 text-white font-semibold text-xs flex items-center space-x-2 shadow-xs transition-all"
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                <span>Select Folder from Computer</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="px-3 py-2 rounded-lg bg-slate-200 dark:bg-neutral-800 hover:bg-slate-300 dark:hover:bg-neutral-700 text-slate-700 dark:text-neutral-200 font-semibold text-xs flex items-center space-x-2 transition-all border border-slate-300 dark:border-neutral-700"
+              >
+                <FileText className="w-3.5 h-3.5 text-blue-500" />
+                <span>Select .DBF Tables Directly</span>
+              </button>
+            </div>
           </div>
 
           {/* Section 3: Custom SET DEFAULT Path & Search Path */}
@@ -292,7 +471,7 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
                     type="text"
                     value={customPathInput}
                     onChange={(e) => setCustomPathInput(e.target.value)}
-                    placeholder="e.g. X:\VFP_DATA\"
+                    placeholder="e.g. D:\VFP_DATA\"
                     className="flex-1 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 font-mono text-xs"
                   />
                   <button
@@ -313,9 +492,9 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
                   value={searchPath}
                   onChange={(e) => {
                     setSearchPath(e.target.value);
-                    onUpdateProjectSettings({ searchPath: e.target.value });
+                    applyProjectSettings({ searchPath: e.target.value });
                   }}
-                  placeholder="e.g. X:\DATA;X:\FORMS;X:\REPORTS"
+                  placeholder="e.g. D:\DATA;D:\FORMS;D:\REPORTS"
                   className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-neutral-700 bg-white dark:bg-neutral-800 font-mono text-xs"
                 />
               </div>
@@ -367,7 +546,7 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
                       <td className="py-1.5 px-3 text-right">
                         <button
                           onClick={() => {
-                            onSelectTable(t.id);
+                            if (onSelectTable) onSelectTable(t.id);
                             onClose();
                           }}
                           className="px-2 py-0.5 rounded bg-orange-600 text-white font-medium hover:bg-orange-700 text-[10px]"
@@ -388,7 +567,7 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
                       <td className="py-1.5 px-3 text-right font-mono">{mf.size.toLocaleString()} B</td>
                       <td className="py-1.5 px-3 text-right">
                         <span className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-neutral-700 text-slate-600 dark:text-neutral-300 text-[10px]">
-                          Local Disk
+                          Local Disk File
                         </span>
                       </td>
                     </tr>
@@ -402,7 +581,7 @@ export const DriveManagerModal: React.FC<DriveManagerModalProps> = ({
         {/* Footer */}
         <div className="flex items-center justify-between p-3.5 border-t border-inherit bg-slate-50 dark:bg-neutral-800">
           <div className="text-[11px] text-slate-500">
-            Tip: You can also type <code>SET DEFAULT TO X:\DATA</code> in the Command Window (Ctrl+F2) anytime.
+            Tip: You can also type <code>SET DEFAULT TO D:\DATA</code> in the Command Window (Ctrl+F2) anytime.
           </div>
           <button
             onClick={onClose}

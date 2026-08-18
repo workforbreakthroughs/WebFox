@@ -180,9 +180,9 @@ export const DBFImportExportModal: React.FC<DBFImportExportModalProps> = ({
               >
                 <Upload className="w-10 h-10 text-orange-500 mb-2 stroke-1" />
                 <h4 className="font-bold text-sm text-slate-800 dark:text-neutral-200">
-                  Drop your FoxPro .DBF or .CSV file here
+                  Select or drop your FoxPro .DBF or .CSV file
                 </h4>
-                <p className="text-slate-500 text-xs mt-1">or click to browse from your Linux filesystem</p>
+                <p className="text-slate-500 text-xs mt-1">Direct client-side binary parsing • Files never leave your computer</p>
                 <input
                   ref={fileInputRef}
                   type="file"

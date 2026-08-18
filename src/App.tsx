@@ -645,7 +645,13 @@ export default function App() {
         isOpen={isDriveManagerOpen}
         onClose={() => setIsDriveManagerOpen(false)}
         project={project}
-        onUpdateProject={handleUpdateProjectSettings}
+        onUpdateProjectSettings={handleUpdateProjectSettings}
+        onUpdateProject={setProject}
+        onImportTable={handleImportTable}
+        onSelectTable={(tableId) => {
+          setActiveTableId(tableId);
+          setActiveView('table_browse');
+        }}
         theme={theme}
       />
 

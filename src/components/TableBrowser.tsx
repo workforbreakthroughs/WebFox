@@ -18,10 +18,14 @@ import {
   Sparkles,
   Edit2,
   Table as TableIcon,
-  X
+  X,
+  HardDrive,
+  Save,
+  ShieldCheck
 } from 'lucide-react';
 import { DBFField, DBFRecord, DBFTable } from '../types/foxpro';
 import { DBFBinaryEngine } from '../services/dbfEngine';
+import { directDiskService } from '../services/directDiskService';
 
 interface TableBrowserProps {
   table: DBFTable;
@@ -44,6 +48,7 @@ export const TableBrowser: React.FC<TableBrowserProps> = ({
   const [hideDeleted, setHideDeleted] = useState<boolean>(false);
   const [sortField, setSortField] = useState<string | null>(table.activeTag ? table.indexes.find(i => i.tag === table.activeTag)?.expression || null : null);
   const [sortDirection, setSortDirection] = useState<'ASC' | 'DESC'>('ASC');
+  const [diskSaveStatus, setDiskSaveStatus] = useState<string | null>(null);
   
   // Memo viewer / editor modal
   const [memoEditorOpen, setMemoEditorOpen] = useState<{ open: boolean; fieldName: string; recno: number; text: string }>({
@@ -52,6 +57,19 @@ export const TableBrowser: React.FC<TableBrowserProps> = ({
     recno: 1,
     text: '',
   });
+
+  // Direct disk save handler
+  const handleSaveDirectlyToDisk = async () => {
+    setDiskSaveStatus('Writing directly to local hard drive...');
+    const res = await directDiskService.saveTableDirectlyToDisk(table);
+    if (res.success) {
+      setDiskSaveStatus('⚡ Saved directly to local disk!');
+      setTimeout(() => setDiskSaveStatus(null), 4000);
+    } else {
+      setDiskSaveStatus(`Notice: ${res.message}`);
+      setTimeout(() => setDiskSaveStatus(null), 6000);
+    }
+  };
 
   // Filtered & Sorted records
   const filteredRecords = useMemo(() => {
@@ -259,10 +277,28 @@ export const TableBrowser: React.FC<TableBrowserProps> = ({
           <span className="opacity-75 font-normal">
             ({table.records.length} records, {table.fields.length} fields)
           </span>
+          {directDiskService.isMounted() && (
+            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold border border-emerald-500/30 flex items-center space-x-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>⚡ Direct Disk: {directDiskService.getMountedFolderName()}</span>
+            </span>
+          )}
         </div>
 
         {/* Toolbar Controls */}
         <div className="flex items-center space-x-1.5">
+          {/* Direct Disk Save */}
+          {directDiskService.isMounted() && (
+            <button
+              onClick={handleSaveDirectlyToDisk}
+              className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center space-x-1 shadow-xs transition-colors"
+              title="Save changes directly back to physical .DBF on hard drive"
+            >
+              <Save className="w-3 h-3" />
+              <span>Save to Disk</span>
+            </button>
+          )}
+
           {/* Modify Structure */}
           <button
             id="btn_browse_modi_stru"
@@ -278,7 +314,7 @@ export const TableBrowser: React.FC<TableBrowserProps> = ({
             id="btn_browse_download_dbf"
             onClick={handleExportDBF}
             className="px-2 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium flex items-center space-x-1 shadow-sm"
-            title="Save as standard DBF binary file for Linux"
+            title="Download DBF binary copy"
           >
             <Download className="w-3 h-3" />
             <span>.DBF</span>
@@ -299,6 +335,19 @@ export const TableBrowser: React.FC<TableBrowserProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Disk Save Toast Feedback */}
+      {diskSaveStatus && (
+        <div className="px-4 py-1.5 bg-emerald-600 text-white text-[11px] font-semibold flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <HardDrive className="w-3.5 h-3.5" />
+            <span>{diskSaveStatus}</span>
+          </div>
+          <button onClick={() => setDiskSaveStatus(null)} className="hover:opacity-75">
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
 
       {/* Navigation, Search & Filter Bar */}
       <div className="flex flex-wrap items-center justify-between px-3 py-1.5 border-b border-inherit bg-slate-50 dark:bg-neutral-900 text-xs gap-2">
